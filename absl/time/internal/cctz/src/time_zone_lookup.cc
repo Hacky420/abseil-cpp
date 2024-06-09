@@ -17,9 +17,6 @@
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
-#if defined(__ANDROID_API__) && __ANDROID_API__ >= 21
-#include <dlfcn.h>
-#endif
 #endif
 
 #if defined(__APPLE__)
@@ -39,7 +36,12 @@
 #include <sdkddkver.h>
 // Include only when the SDK is for Windows 10 (and later), and the binary is
 // targeted for Windows XP and later.
-#if defined(_WIN32_WINNT_WIN10) && (_WIN32_WINNT >= _WIN32_WINNT_WINXP)
+// Note: The Windows SDK added windows.globalization.h file for Windows 10, but
+// MinGW did not add it until NTDDI_WIN10_NI (SDK version 10.0.22621.0).
+#if ((defined(_WIN32_WINNT_WIN10) && !defined(__MINGW32__)) ||        \
+     (defined(NTDDI_WIN10_NI) && NTDDI_VERSION >= NTDDI_WIN10_NI)) && \
+    (_WIN32_WINNT >= _WIN32_WINNT_WINXP)
+#define USE_WIN32_LOCAL_TIME_ZONE
 #include <roapi.h>
 #include <tchar.h>
 #include <wchar.h>
@@ -61,33 +63,7 @@ namespace time_internal {
 namespace cctz {
 
 namespace {
-#if defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ >= 21
-// Android 'L' removes __system_property_get() from the NDK, however
-// it is still a hidden symbol in libc so we use dlsym() to access it.
-// See Chromium's base/sys_info_android.cc for a similar example.
-
-using property_get_func = int (*)(const char*, char*);
-
-property_get_func LoadSystemPropertyGet() {
-  int flag = RTLD_LAZY | RTLD_GLOBAL;
-#if defined(RTLD_NOLOAD)
-  flag |= RTLD_NOLOAD;  // libc.so should already be resident
-#endif
-  if (void* handle = dlopen("libc.so", flag)) {
-    void* sym = dlsym(handle, "__system_property_get");
-    dlclose(handle);
-    return reinterpret_cast<property_get_func>(sym);
-  }
-  return nullptr;
-}
-
-int __system_property_get(const char* name, char* value) {
-  static property_get_func system_property_get = LoadSystemPropertyGet();
-  return system_property_get ? system_property_get(name, value) : -1;
-}
-#endif
-
-#if defined(_WIN32_WINNT_WIN10) && (_WIN32_WINNT >= _WIN32_WINNT_WINXP)
+#if defined(USE_WIN32_LOCAL_TIME_ZONE)
 // Calls the WinRT Calendar.GetTimeZone method to obtain the IANA ID of the
 // local time zone. Returns an empty vector in case of an error.
 std::string win32_local_time_zone(const HMODULE combase) {
@@ -278,7 +254,7 @@ time_zone local_time_zone() {
     zone = primary_tz.c_str();
   }
 #endif
-#if defined(_WIN32_WINNT_WIN10) && (_WIN32_WINNT >= _WIN32_WINNT_WINXP)
+#if defined(USE_WIN32_LOCAL_TIME_ZONE)
   // Use the WinRT Calendar class to get the local time zone. This feature is
   // available on Windows 10 and later. The library is dynamically linked to
   // maintain binary compatibility with Windows XP - Windows 7. On Windows 8,

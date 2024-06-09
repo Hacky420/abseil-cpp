@@ -14,14 +14,25 @@
 
 #include "absl/container/flat_hash_map.h"
 
+#include <cstddef>
 #include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "absl/base/config.h"
 #include "absl/container/internal/hash_generator_testing.h"
+#include "absl/container/internal/hash_policy_testing.h"
+#include "absl/container/internal/test_allocator.h"
 #include "absl/container/internal/unordered_map_constructor_test.h"
 #include "absl/container/internal/unordered_map_lookup_test.h"
 #include "absl/container/internal/unordered_map_members_test.h"
 #include "absl/container/internal/unordered_map_modifiers_test.h"
 #include "absl/log/check.h"
+#include "absl/meta/type_traits.h"
 #include "absl/types/any.h"
 
 namespace absl {
@@ -102,6 +113,34 @@ TEST(FlatHashMap, StandardLayout) {
   }
 }
 
+TEST(FlatHashMap, Relocatability) {
+  static_assert(absl::is_trivially_relocatable<int>::value, "");
+  static_assert(
+      absl::is_trivially_relocatable<std::pair<const int, int>>::value, "");
+  static_assert(
+      std::is_same<decltype(absl::container_internal::FlatHashMapPolicy<
+                            int, int>::transfer<std::allocator<char>>(nullptr,
+                                                                      nullptr,
+                                                                      nullptr)),
+                   std::true_type>::value,
+      "");
+
+    struct NonRelocatable {
+      NonRelocatable() = default;
+      NonRelocatable(NonRelocatable&&) {}
+      NonRelocatable& operator=(NonRelocatable&&) { return *this; }
+      void* self = nullptr;
+    };
+
+  EXPECT_FALSE(absl::is_trivially_relocatable<NonRelocatable>::value);
+  EXPECT_TRUE(
+      (std::is_same<decltype(absl::container_internal::FlatHashMapPolicy<
+                            int, NonRelocatable>::
+                                transfer<std::allocator<char>>(nullptr, nullptr,
+                                                               nullptr)),
+                   std::false_type>::value));
+}
+
 // gcc becomes unhappy if this is inside the method, so pull it out here.
 struct balast {};
 
@@ -150,9 +189,7 @@ struct Hash {
 
 struct Eq {
   using is_transparent = void;
-  bool operator()(size_t lhs, size_t rhs) const {
-    return lhs == rhs;
-  }
+  bool operator()(size_t lhs, size_t rhs) const { return lhs == rhs; }
   bool operator()(size_t lhs, const LazyInt& rhs) const {
     return lhs == rhs.value;
   }
@@ -317,6 +354,49 @@ TEST(FlatHashMap, RecursiveTypeCompiles) {
   };
   RecursiveType t;
   t.m[0] = RecursiveType{};
+}
+
+TEST(FlatHashMap, FlatHashMapPolicyDestroyReturnsTrue) {
+  EXPECT_TRUE(
+      (decltype(FlatHashMapPolicy<int, char>::destroy<std::allocator<char>>(
+          nullptr, nullptr))()));
+  EXPECT_FALSE(
+      (decltype(FlatHashMapPolicy<int, char>::destroy<CountingAllocator<char>>(
+          nullptr, nullptr))()));
+  EXPECT_FALSE((decltype(FlatHashMapPolicy<int, std::unique_ptr<int>>::destroy<
+                         std::allocator<char>>(nullptr, nullptr))()));
+}
+
+struct InconsistentHashEqType {
+  InconsistentHashEqType(int v1, int v2) : v1(v1), v2(v2) {}
+  template <typename H>
+  friend H AbslHashValue(H h, InconsistentHashEqType t) {
+    return H::combine(std::move(h), t.v1);
+  }
+  bool operator==(InconsistentHashEqType t) const { return v2 == t.v2; }
+  int v1, v2;
+};
+
+TEST(Iterator, InconsistentHashEqFunctorsValidation) {
+  if (!IsAssertEnabled()) GTEST_SKIP() << "Assertions not enabled.";
+
+  absl::flat_hash_map<InconsistentHashEqType, int> m;
+  for (int i = 0; i < 10; ++i) m[{i, i}] = 1;
+  // We need to insert multiple times to guarantee that we get the assertion
+  // because it's possible for the hash to collide with the inserted element
+  // that has v2==0. In those cases, the new element won't be inserted.
+  auto insert_conflicting_elems = [&] {
+    for (int i = 100; i < 20000; ++i) {
+      EXPECT_EQ((m[{i, 0}]), 1);
+    }
+  };
+
+  const char* crash_message = "hash/eq functors are inconsistent.";
+#if defined(__arm__) || defined(__aarch64__)
+  // On ARM, the crash message is garbled so don't expect a specific message.
+  crash_message = "";
+#endif
+  EXPECT_DEATH_IF_SUPPORTED(insert_conflicting_elems(), crash_message);
 }
 
 }  // namespace
